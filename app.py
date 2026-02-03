@@ -27,8 +27,8 @@ st.set_page_config(
 def get_client():
     """Create a cached Binance client from Streamlit secrets."""
     return Client(
-        st.secrets["6JJK9yNHQMKNArrtEJaZ2e1lGcwdhSKF6SSM1ql0acLSB9cuieDMvLXCgRo7s67d"],
-        st.secrets["CGn7hEGeAR5BuVHill9vsGCD5te0AE6vnp0fcJE1tmTYJ3gCU8r1qDeEEAZHLZvB"],
+        st.secrets["BINANCE_API_KEY"],
+        st.secrets["BINANCE_API_SECRET"],
     )
 
 
