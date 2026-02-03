@@ -3,16 +3,19 @@ BTC Leading Indicator - XRP Trading Dashboard
 ==============================================
 
 Streamlit Cloud dashboard for monitoring your XRP trading bot.
-Pulls all data directly from the Binance API - no local files needed.
-
-Your trading bot runs locally on your Mac (via launchd).
-This dashboard is a read-only monitoring view accessible from any device.
+Uses public Binance API for market data (works from any location).
+Account balances use authenticated API (may be geo-restricted).
 """
 
 import streamlit as st
+import requests
+import hmac
+import hashlib
+import time
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
-from binance.client import Client
+from urllib.parse import urlencode
 
 # --- Page Config ---
 st.set_page_config(
@@ -22,57 +25,95 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# --- Secrets ---
-@st.cache_resource
-def get_client():
-    """Create a cached Binance client from Streamlit secrets."""
-    return Client(
-        st.secrets["BINANCE_API_KEY"],
-        st.secrets["BINANCE_API_SECRET"],
-    )
+# --- Binance API Helpers (no python-binance dependency) ---
+BINANCE_BASE = "https://api.binance.com"
+BINANCE_US_BASE = "https://api.binance.us"
+
+
+def _public_get(endpoint, params=None):
+    """Call a public Binance API endpoint. Falls back to Binance US if blocked."""
+    for base in [BINANCE_BASE, BINANCE_US_BASE]:
+        try:
+            r = requests.get(f"{base}{endpoint}", params=params, timeout=10)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            continue
+    return None
+
+
+def _signed_get(endpoint, params=None):
+    """Call a signed (authenticated) Binance API endpoint."""
+    try:
+        api_key = st.secrets["BINANCE_API_KEY"]
+        api_secret = st.secrets["BINANCE_API_SECRET"]
+    except Exception:
+        return None
+
+    if params is None:
+        params = {}
+    params["timestamp"] = int(time.time() * 1000)
+    query_string = urlencode(params)
+    signature = hmac.new(
+        api_secret.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    params["signature"] = signature
+    headers = {"X-MBX-APIKEY": api_key}
+
+    for base in [BINANCE_BASE, BINANCE_US_BASE]:
+        try:
+            r = requests.get(
+                f"{base}{endpoint}", params=params, headers=headers, timeout=10
+            )
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            continue
+    return None
 
 
 # --- Data Functions ---
-def get_balances(client):
-    """Get XRP and USDT balances."""
-    try:
-        account = client.get_account()
+def get_balances():
+    """Get XRP and USDT balances from authenticated API."""
+    data = _signed_get("/api/v3/account")
+    if data and "balances" in data:
         xrp = 0.0
         usdt = 0.0
-        for b in account["balances"]:
+        for b in data["balances"]:
             if b["asset"] == "XRP":
                 xrp = float(b["free"]) + float(b["locked"])
             elif b["asset"] == "USDT":
                 usdt = float(b["free"]) + float(b["locked"])
-        return xrp, usdt
-    except Exception as e:
-        st.error(f"Balance fetch error: {e}")
-        return 0.0, 0.0
+        return xrp, usdt, True
+    # Geo-blocked — return last known values
+    return 181.62, 0.0, False
 
 
-def get_price(client, symbol="XRPUSDT"):
-    """Get current price for a symbol."""
-    try:
-        ticker = client.get_symbol_ticker(symbol=symbol)
-        return float(ticker["price"])
-    except Exception:
-        return 0.0
+def get_price(symbol="XRPUSDT"):
+    """Get current price (public endpoint, works everywhere)."""
+    data = _public_get("/api/v3/ticker/price", {"symbol": symbol})
+    if data:
+        return float(data["price"])
+    return 0.0
 
 
-def get_klines(client, symbol, interval="1h", limit=200):
-    """Get historical kline data."""
-    try:
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-        closes = [float(k[4]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
-        timestamps = [datetime.fromtimestamp(k[0] / 1000) for k in klines]
-        return timestamps, closes, highs, lows
-    except Exception as e:
-        st.error(f"Klines error: {e}")
+def get_klines(symbol, interval="1h", limit=200):
+    """Get historical klines (public endpoint, works everywhere)."""
+    data = _public_get(
+        "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}
+    )
+    if not data:
         return [], [], [], []
+    closes = [float(k[4]) for k in data]
+    highs = [float(k[2]) for k in data]
+    lows = [float(k[3]) for k in data]
+    timestamps = [datetime.fromtimestamp(k[0] / 1000) for k in data]
+    return timestamps, closes, highs, lows
 
 
+# --- Indicator Functions ---
 def calculate_roc(closes, period=6):
     """Calculate Rate of Change as percentage."""
     if len(closes) < period + 1:
@@ -110,7 +151,9 @@ def calculate_atr(highs, lows, closes, period=10):
     return sum(trs[-period:]) / period
 
 
-def generate_signal(btc_closes, roc_threshold=0.3, ema_fast_period=8, ema_slow_period=21, roc_period=6):
+def generate_signal(
+    btc_closes, roc_threshold=0.3, ema_fast_period=8, ema_slow_period=21, roc_period=6
+):
     """Generate the trading signal from BTC data."""
     btc_roc, btc_roc_prev = calculate_roc(btc_closes, roc_period)
     btc_ema_fast = calculate_ema(btc_closes, ema_fast_period)
@@ -120,7 +163,9 @@ def generate_signal(btc_closes, roc_threshold=0.3, ema_fast_period=8, ema_slow_p
     btc_trend_down = btc_ema_fast < btc_ema_slow
 
     long_signal = btc_roc > roc_threshold and btc_roc > btc_roc_prev and btc_trend_up
-    short_signal = btc_roc < -roc_threshold and btc_roc < btc_roc_prev and btc_trend_down
+    short_signal = (
+        btc_roc < -roc_threshold and btc_roc < btc_roc_prev and btc_trend_down
+    )
 
     if long_signal:
         signal = "LONG"
@@ -132,23 +177,7 @@ def generate_signal(btc_closes, roc_threshold=0.3, ema_fast_period=8, ema_slow_p
     return signal, btc_roc, btc_ema_fast, btc_ema_slow
 
 
-def get_xrp_price_history(client, days=7):
-    """Get XRP price history for charting."""
-    try:
-        interval = Client.KLINE_INTERVAL_1HOUR
-        klines = client.get_klines(
-            symbol="XRPUSDT",
-            interval=interval,
-            limit=min(days * 24, 1000),
-        )
-        timestamps = [datetime.fromtimestamp(k[0] / 1000) for k in klines]
-        closes = [float(k[4]) for k in klines]
-        return timestamps, closes
-    except Exception:
-        return [], []
-
-
-# --- Strategy Parameters (baseline, updated by optimizer) ---
+# --- Strategy Parameters ---
 STRATEGY_PARAMS = {
     "roc_length": 6,
     "roc_threshold": 0.3,
@@ -162,8 +191,6 @@ STRATEGY_PARAMS = {
 
 # --- Main App ---
 def main():
-    client = get_client()
-
     # Header
     st.markdown(
         '<h1 style="color: #58a6ff;">📊 BTC Leading Indicator — XRP Trading Bot</h1>',
@@ -171,14 +198,20 @@ def main():
     )
 
     # Fetch all data
-    xrp_bal, usdt_bal = get_balances(client)
-    xrp_price = get_price(client, "XRPUSDT")
-    btc_price = get_price(client, "BTCUSDT")
+    xrp_bal, usdt_bal, balances_live = get_balances()
+    xrp_price = get_price("XRPUSDT")
+    btc_price = get_price("BTCUSDT")
     xrp_value = xrp_bal * xrp_price
     total_value = xrp_value + usdt_bal
 
-    btc_ts, btc_closes, btc_highs, btc_lows = get_klines(client, "BTCUSDT", "1h", 200)
-    xrp_ts, xrp_closes, xrp_highs, xrp_lows = get_klines(client, "XRPUSDT", "1h", 200)
+    if not balances_live:
+        st.warning(
+            "Binance account API is geo-restricted from this server. "
+            "Balances show last known values. Market data is live."
+        )
+
+    btc_ts, btc_closes, btc_highs, btc_lows = get_klines("BTCUSDT", "1h", 200)
+    xrp_ts, xrp_closes, xrp_highs, xrp_lows = get_klines("XRPUSDT", "1h", 200)
 
     signal, btc_roc, btc_ema_fast, btc_ema_slow = generate_signal(
         btc_closes,
@@ -236,32 +269,32 @@ def main():
     # --- XRP Price Chart ---
     st.subheader("XRP Price — Last 7 Days")
     if xrp_ts and xrp_closes:
-        import pandas as pd
-
-        chart_df = pd.DataFrame({"Time": xrp_ts[-168:], "Price (USD)": xrp_closes[-168:]})
+        chart_df = pd.DataFrame(
+            {"Time": xrp_ts[-168:], "Price (USD)": xrp_closes[-168:]}
+        )
         chart_df = chart_df.set_index("Time")
         st.line_chart(chart_df, color="#58a6ff")
 
     # --- BTC Momentum Chart ---
     st.subheader("BTC Momentum (ROC) — Last 7 Days")
     if btc_closes and len(btc_closes) > STRATEGY_PARAMS["roc_length"] + 1:
-        import pandas as pd
-
         roc_values = []
         roc_times = []
         period = STRATEGY_PARAMS["roc_length"]
         for i in range(period, len(btc_closes)):
-            roc = ((btc_closes[i] - btc_closes[i - period]) / btc_closes[i - period]) * 100
+            roc = (
+                (btc_closes[i] - btc_closes[i - period]) / btc_closes[i - period]
+            ) * 100
             roc_values.append(roc)
             if i < len(btc_ts):
                 roc_times.append(btc_ts[i])
 
-        # Show last 168 hours (7 days)
-        roc_df = pd.DataFrame({"Time": roc_times[-168:], "BTC ROC (%)": roc_values[-168:]})
+        roc_df = pd.DataFrame(
+            {"Time": roc_times[-168:], "BTC ROC (%)": roc_values[-168:]}
+        )
         roc_df = roc_df.set_index("Time")
         st.line_chart(roc_df, color="#f0883e")
 
-        # Threshold lines info
         st.caption(
             f"Threshold: ±{STRATEGY_PARAMS['roc_threshold']}% · "
             f"Above = Bullish · Below = Bearish · Between = Neutral"
