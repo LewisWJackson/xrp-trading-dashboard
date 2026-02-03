@@ -204,12 +204,6 @@ def main():
     xrp_value = xrp_bal * xrp_price
     total_value = xrp_value + usdt_bal
 
-    if not balances_live:
-        st.warning(
-            "Binance account API is geo-restricted from this server. "
-            "Balances show last known values. Market data is live."
-        )
-
     btc_ts, btc_closes, btc_highs, btc_lows = get_klines("BTCUSDT", "1h", 200)
     xrp_ts, xrp_closes, xrp_highs, xrp_lows = get_klines("XRPUSDT", "1h", 200)
 
@@ -221,48 +215,40 @@ def main():
         roc_period=STRATEGY_PARAMS["roc_length"],
     )
 
-    # Position detection
-    position = "IN XRP" if xrp_value > usdt_bal else "IN USDT"
+    # --- Row 1: Signal (the most important thing) ---
+    if signal == "LONG":
+        st.success(f"📈 **BULLISH SIGNAL** — BTC ROC: {btc_roc:+.2f}% — Bot is buying/holding XRP")
+    elif signal == "SHORT":
+        st.error(f"📉 **BEARISH SIGNAL** — BTC ROC: {btc_roc:+.2f}% — Bot is selling XRP")
+    else:
+        st.info(f"➡️ **NEUTRAL** — BTC ROC: {btc_roc:+.2f}% — No action")
 
-    # --- Row 1: Key Metrics ---
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("XRP Balance", f"{xrp_bal:.2f} XRP", f"${xrp_value:.2f}")
-
-    with col2:
-        st.metric("USDT Balance", f"${usdt_bal:.2f}")
-
-    with col3:
-        st.metric("XRP Price", f"${xrp_price:.4f}")
-
-    with col4:
-        st.metric("BTC Price", f"${btc_price:,.0f}")
-
-    # --- Row 2: Signal + Position + Portfolio ---
+    # --- Row 2: Prices ---
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        if signal == "LONG":
-            st.success(f"📈 **BULLISH** — BTC ROC: {btc_roc:+.2f}%")
-            st.caption("Signal: Hold / Buy XRP")
-        elif signal == "SHORT":
-            st.error(f"📉 **BEARISH** — BTC ROC: {btc_roc:+.2f}%")
-            st.caption("Signal: Sell XRP")
-        else:
-            st.info(f"➡️ **NEUTRAL** — BTC ROC: {btc_roc:+.2f}%")
-            st.caption("Signal: No action")
-
+        st.metric("XRP Price", f"${xrp_price:.4f}")
     with col2:
-        if position == "IN XRP":
-            st.success(f"🟢 **{position}**")
-            st.caption("Waiting for sell signal")
-        else:
-            st.warning(f"🟡 **{position}**")
-            st.caption("Waiting for buy signal")
-
+        st.metric("BTC Price", f"${btc_price:,.0f}")
     with col3:
-        st.metric("Total Portfolio", f"${total_value:.2f}")
+        st.metric("BTC Momentum", f"{btc_roc:+.2f}%",
+                  delta=f"Threshold: ±{STRATEGY_PARAMS['roc_threshold']}%")
+
+    # --- Row 3: Account balances (if available) ---
+    if balances_live:
+        position = "IN XRP" if xrp_value > usdt_bal else "IN USDT"
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("XRP Balance", f"{xrp_bal:.2f} XRP", f"${xrp_value:.2f}")
+        with col2:
+            st.metric("USDT Balance", f"${usdt_bal:.2f}")
+        with col3:
+            st.metric("Total Portfolio", f"${total_value:.2f}")
+    else:
+        st.caption(
+            "💡 Live account balances unavailable (Binance API is geo-restricted from this server). "
+            "Check your local dashboard at localhost:8080 for balances. "
+            "All market data and signals above are live."
+        )
 
     st.divider()
 
